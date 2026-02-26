@@ -1,6 +1,6 @@
 import type { Dirent } from "node:fs";
-import { open, readdir, readFile, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import ignore from "ignore";
 import { computeFileHash, formatHashlineNumberedLines } from "./hashline";
 
@@ -614,4 +614,208 @@ export async function safeReadFileEnhanced(
     fileHash: computeFileHash(rawContent),
     lastModified: check.lastModified ?? "unknown",
   };
+}
+
+// ─── Write Safety Guards (C-1, C-2, H-1) ───────────────────────────────
+
+interface FileWriteGuardContext {
+  filePath: string;
+  resolvedFilePath: string;
+  rootDir: string;
+}
+
+type FileWriteGuard = (
+  context: FileWriteGuardContext
+) => FileCheckResult | null | Promise<FileCheckResult | null>;
+
+/**
+ * C-1: Path traversal guard.
+ * Resolves the input path and rejects it if it escapes the project root.
+ */
+const checkPathTraversalGuard: FileWriteGuard = ({
+  filePath,
+  resolvedFilePath,
+  rootDir,
+}) => {
+  // After resolve(), all '..' segments are normalized
+  if (
+    resolvedFilePath !== rootDir &&
+    !resolvedFilePath.startsWith(rootDir + sep)
+  ) {
+    return {
+      allowed: false,
+      reason:
+        `Path traversal blocked: '${filePath}' resolves to '${resolvedFilePath}' ` +
+        `which is outside the project root '${rootDir}'.`,
+    };
+  }
+  return null;
+};
+
+/**
+ * C-2: Symlink guard.
+ * Uses lstat() (doesn't follow symlinks) to detect symlinks, then
+ * fs.realpath() to verify the target stays within the project root.
+ * For non-existent files, walks ancestors to detect symlink escapes.
+ */
+const checkSymlinkGuard: FileWriteGuard = async ({
+  filePath,
+  resolvedFilePath,
+  rootDir,
+}) => {
+  try {
+    const stats = await lstat(resolvedFilePath);
+    if (stats.isSymbolicLink()) {
+      // Resolve where the symlink actually points
+      let realTarget: string;
+      try {
+        realTarget = await realpath(resolvedFilePath);
+      } catch {
+        return {
+          allowed: false,
+          reason: `Refusing to modify dangling symlink: '${filePath}'.`,
+        };
+      }
+
+      if (
+        realTarget !== rootDir &&
+        !realTarget.startsWith(rootDir + sep)
+      ) {
+        return {
+          allowed: false,
+          reason:
+            `Symlink escape blocked: '${filePath}' is a symlink pointing to ` +
+            `'${realTarget}' outside project root.`,
+        };
+      }
+
+      return {
+        allowed: false,
+        reason:
+          `Refusing to modify through symlink: '${filePath}'. ` +
+          `Use the real path '${realTarget}' instead.`,
+      };
+    }
+  } catch (error) {
+    // Re-throw symlink-specific errors
+    if (
+      error instanceof Error &&
+      (error.message.includes("symlink") ||
+        error.message.includes("Symlink"))
+    ) {
+      return {
+        allowed: false,
+        reason: error.message,
+      };
+    }
+
+    // ENOENT: file doesn't exist yet — check closest existing ancestor
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return await checkAncestorSymlinkSafety(
+        filePath,
+        resolvedFilePath,
+        rootDir
+      );
+    }
+
+    // Propagate unexpected errors as safety failures
+    if (!isErrnoException(error) || error.code !== "ENOENT") {
+      return {
+        allowed: false,
+        reason:
+          `Unable to verify safety of '${filePath}': ` +
+          `${error instanceof Error ? error.message : "unknown error"}`,
+      };
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Walk up from a non-existent path to the closest existing ancestor,
+ * resolve it with realpath(), and verify it stays within the project root.
+ */
+async function checkAncestorSymlinkSafety(
+  filePath: string,
+  resolvedFilePath: string,
+  rootDir: string
+): Promise<FileCheckResult | null> {
+  let current = dirname(resolvedFilePath);
+
+  // Walk upward until we find an existing directory or hit the root dir
+  while (current !== rootDir && current !== dirname(current)) {
+    try {
+      const realParent = await realpath(current);
+      if (
+        realParent !== rootDir &&
+        !realParent.startsWith(rootDir + sep)
+      ) {
+        return {
+          allowed: false,
+          reason:
+            `Symlink escape blocked: ancestor directory of '${filePath}' ` +
+            `resolves to '${realParent}' outside project root.`,
+        };
+      }
+      // Ancestor is valid — safe to proceed
+      return null;
+    } catch (ancestorError) {
+      if (
+        isErrnoException(ancestorError) &&
+        ancestorError.code === "ENOENT"
+      ) {
+        current = dirname(current);
+        continue;
+      }
+      return {
+        allowed: false,
+        reason: `Unable to verify ancestor safety for '${filePath}'.`,
+      };
+    }
+  }
+
+  return null;
+}
+
+const FILE_WRITE_GUARDS: FileWriteGuard[] = [
+  checkPathTraversalGuard,
+  checkSymlinkGuard,
+];
+
+/**
+ * Assert that a file path is safe for write/edit/delete operations.
+ *
+ * Runs the path through all write safety guards:
+ *   C-1: Path traversal protection (rejects paths that escape project root)
+ *   C-2: Symlink resolution via fs.realpath() (rejects symlink targets)
+ *
+ * @param filePath - The user-supplied file path
+ * @param rootDir  - Project root directory (defaults to process.cwd())
+ * @returns The resolved absolute path, guaranteed to be within rootDir
+ * @throws Error if any safety guard rejects the path
+ */
+export async function assertWriteSafety(
+  filePath: string,
+  rootDir: string = process.cwd()
+): Promise<string> {
+  const resolvedRoot = resolve(rootDir);
+  const resolvedFilePath = isAbsolute(filePath)
+    ? resolve(filePath)
+    : resolve(resolvedRoot, filePath);
+
+  const context: FileWriteGuardContext = {
+    filePath,
+    resolvedFilePath,
+    rootDir: resolvedRoot,
+  };
+
+  for (const guard of FILE_WRITE_GUARDS) {
+    const result = await guard(context);
+    if (result && !result.allowed) {
+      throw new Error(result.reason);
+    }
+  }
+
+  return resolvedFilePath;
 }
