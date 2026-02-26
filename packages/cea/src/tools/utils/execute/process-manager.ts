@@ -10,6 +10,7 @@ const CANCELLED_EXIT_CODE = 130;
 const TIMEOUT_EXIT_CODE = 124;
 const MAX_IN_MEMORY_OUTPUT_BYTES = 2 * 1024 * 1024;
 const TRIMMED_BUFFER_TARGET_BYTES = 512 * 1024;
+const activeProcesses = new Set<number>();
 
 export interface ExecuteOptions {
   onChunk?: (chunk: string) => void;
@@ -36,6 +37,9 @@ function hasErrnoCode(error: unknown, code: string): boolean {
 }
 
 function isProcessGroupAlive(pid: number): boolean {
+  if (pid <= 0) {
+    return false;
+  }
   try {
     process.kill(-pid, 0);
     return true;
@@ -45,12 +49,16 @@ function isProcessGroupAlive(pid: number): boolean {
 }
 
 function safeKillProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  if (pid <= 0) {
+    return;
+  }
   try {
     process.kill(-pid, signal);
   } catch (error) {
-    if (!hasErrnoCode(error, "ESRCH")) {
+    if (hasErrnoCode(error, "ESRCH")) {
       return;
     }
+    throw error;
   }
 }
 
@@ -147,6 +155,12 @@ export async function executeCommand(
       },
     });
 
+    child.unref();
+
+    if (child.pid) {
+      activeProcesses.add(child.pid);
+    }
+
     const stdoutDecoder = new TextDecoder();
     const stderrDecoder = new TextDecoder();
     let bufferedOutput = "";
@@ -216,6 +230,10 @@ export async function executeCommand(
       }
       settled = true;
 
+      if (child.pid) {
+        activeProcesses.delete(child.pid);
+      }
+
       clearTimeout(timeoutHandle);
       if (signal) {
         signal.removeEventListener("abort", abortHandler);
@@ -273,5 +291,8 @@ export async function executeCommand(
 }
 
 export function cleanup(): void {
-  return;
+  for (const pid of activeProcesses) {
+    killProcessTree(pid);
+  }
+  activeProcesses.clear();
 }
