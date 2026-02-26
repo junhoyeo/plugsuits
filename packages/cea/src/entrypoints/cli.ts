@@ -1220,6 +1220,11 @@ const createCliUi = (skills: SkillInfo[]): CliUi => {
       resolve(null);
     }
 
+    // Break potential circular references from closures and module-level refs
+    activeStreamController = null;
+    streamInterruptRequested = false;
+    activeModalCancel = null;
+
     removeInputListener();
     process.off("SIGINT", onSigInt);
     process.stdout.off("resize", onTerminalResize);

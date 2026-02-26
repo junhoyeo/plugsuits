@@ -9,7 +9,8 @@ import { formatBlock } from "../utils/safety-utils";
 import GREP_FILES_DESCRIPTION from "./grep-files.txt";
 
 const MAX_MATCHES = 20_000;
-
+/** Maximum bytes to buffer from ripgrep stdout before killing the process. */
+const MAX_STDOUT_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB
 interface GrepResult {
   matchCount: number;
   matches: string;
@@ -60,19 +61,28 @@ async function runRipgrep(args: string[], cwd: string): Promise<GrepResult> {
 
     let stdout = "";
     let stderr = "";
+    let bufferExceeded = false;
 
     rg.stdout.on("data", (data: Buffer) => {
+      if (bufferExceeded) return;
       stdout += data.toString();
+      if (stdout.length > MAX_STDOUT_BUFFER_BYTES) {
+        bufferExceeded = true;
+        rg.kill();
+      }
     });
 
     rg.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
+      // Cap stderr too to avoid unbounded accumulation on pathological input
+      if (stderr.length < 65_536) {
+        stderr += data.toString();
+      }
     });
 
     rg.on("close", (code) => {
-      if (code === 0 || code === 1) {
+      if (bufferExceeded || code === 0 || code === 1) {
         const lines = stdout.split("\n").filter((line) => line.length > 0);
-        const truncated = lines.length > MAX_MATCHES;
+        const truncated = bufferExceeded || lines.length > MAX_MATCHES;
         const result = truncated
           ? lines.slice(0, MAX_MATCHES).join("\n")
           : stdout.trim();

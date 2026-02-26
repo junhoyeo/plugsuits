@@ -560,6 +560,10 @@ const processAgentResponse = async (
       });
     }
 
+    // Release references to large strings and maps promptly
+    pendingToolCalls.clear();
+    completedToolCallIds.clear();
+
     if (!shouldContinueManualToolLoop(finishReason)) {
       return;
     }

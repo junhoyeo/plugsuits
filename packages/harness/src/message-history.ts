@@ -54,6 +54,15 @@ export interface Message {
   originalContent?: string;
 }
 
+export interface MessageHistoryOptions {
+  /**
+   * Maximum number of messages to retain. When exceeded, older messages
+   * are trimmed from the front while preserving the initial user message
+   * for context continuity. Defaults to 1000.
+   */
+  maxMessages?: number;
+}
+
 const createMessageId = (() => {
   let counter = 0;
   return (): string => {
@@ -62,8 +71,15 @@ const createMessageId = (() => {
   };
 })();
 
+const DEFAULT_MAX_MESSAGES = 1000;
+
 export class MessageHistory {
   private messages: Message[] = [];
+  private readonly maxMessages: number;
+
+  constructor(options?: MessageHistoryOptions) {
+    this.maxMessages = options?.maxMessages ?? DEFAULT_MAX_MESSAGES;
+  }
 
   getAll(): Message[] {
     return [...this.messages];
@@ -84,6 +100,7 @@ export class MessageHistory {
       originalContent,
     };
     this.messages.push(message);
+    this.enforceLimit();
     return message;
   }
 
@@ -102,7 +119,23 @@ export class MessageHistory {
       created.push(message);
     }
     this.messages.push(...created);
+    this.enforceLimit();
     return created;
+  }
+
+  private enforceLimit(): void {
+    if (this.messages.length <= this.maxMessages) {
+      return;
+    }
+    // Keep the first message (initial user context) and the most recent messages
+    const excess = this.messages.length - this.maxMessages;
+    if (this.maxMessages >= 2) {
+      // Preserve first message, trim from the middle
+      this.messages.splice(1, excess);
+    } else {
+      // Edge case: maxMessages is 1, just keep the last message
+      this.messages.splice(0, excess);
+    }
   }
 
   private sanitizeMessage(message: ModelMessage): ModelMessage {
