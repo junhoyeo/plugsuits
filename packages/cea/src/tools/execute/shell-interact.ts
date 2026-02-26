@@ -105,17 +105,23 @@ export interface InteractResult {
   success: boolean;
 }
 
-const CTRL_C_GUIDANCE = [
-  "No retained terminal context exists. Each shell_execute command runs independently.",
-  "To interrupt a long-running command, wait for its timeout (default: 120s) or use shell_execute to kill the process by PID:",
-  '  shell_execute({ command: "kill -SIGINT <PID>" })',
-].join("\n");
+const DEFAULT_SHELL_EXECUTE_TIMEOUT_SEC = 120;
 
-const GENERIC_GUIDANCE = [
-  "No retained terminal context exists. Each shell_execute command runs independently.",
-  "To run a command, use shell_execute directly:",
-  '  shell_execute({ command: "your command here" })',
-].join("\n");
+function buildCtrlCGuidance(): string {
+  return [
+    "No retained terminal context exists. Each shell_execute command runs independently.",
+    `To interrupt a long-running command, wait for its timeout (default: ${DEFAULT_SHELL_EXECUTE_TIMEOUT_SEC}s) or use shell_execute to kill the process by PID:`,
+    '  shell_execute({ command: "kill -SIGINT <PID>" })',
+  ].join("\n");
+}
+
+function buildGenericGuidance(): string {
+  return [
+    "No retained terminal context exists. Each shell_execute command runs independently.",
+    "To run a command, use shell_execute directly:",
+    '  shell_execute({ command: "your command here" })',
+  ].join("\n");
+}
 
 function hasCtrlC(parsedKeys: string[]): boolean {
   return parsedKeys.includes("C-c");
@@ -137,9 +143,9 @@ export const shellInteractTool = tool({
       .describe("Wait time after sending keys (default: 500)"),
   }),
 
-  execute: ({ keystrokes }): Promise<InteractResult> => {
+  execute: ({ keystrokes, timeout_ms: _timeout_ms }): Promise<InteractResult> => {
     const parsedKeys = parseKeys(keystrokes);
-    const guidance = hasCtrlC(parsedKeys) ? CTRL_C_GUIDANCE : GENERIC_GUIDANCE;
+    const guidance = hasCtrlC(parsedKeys) ? buildCtrlCGuidance() : buildGenericGuidance();
 
     return Promise.resolve({
       success: true,

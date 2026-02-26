@@ -37,7 +37,8 @@ export async function getIncompleteTodos(): Promise<TodoItem[]> {
   try {
     const content = await readFile(todoPath, "utf-8");
     data = JSON.parse(content);
-  } catch {
+  } catch (error: unknown) {
+    console.error("Failed to parse todo file:", error);
     return [];
   }
 
